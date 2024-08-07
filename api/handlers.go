@@ -2,16 +2,19 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"myserver/kafka"
+	"myserver/model"
 	"net/http"
 	"strconv"
-
-	"myserver/model"
+	"sync"
 
 	"github.com/dgrijalva/jwt-go"
 	"github.com/gorilla/context"
 	"github.com/gorilla/mux"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 )
 
 var jwtSecret = []byte("your_secret_key") // Use a secure key
@@ -64,10 +67,18 @@ func (h *Handler) RegisterRoutes(router *mux.Router) {
 	router.HandleFunc("/register", h.RegisterUser).Methods("POST")
 	router.HandleFunc("/login", h.LoginUser).Methods("POST")
 
+	router.HandleFunc("/users", h.fetchAllUsers).Methods("GET")
+
 	// Apply JWTMiddleware to the /setUpProfile route
 	profileRoute := router.PathPrefix("/setUpProfile").Subrouter()
 	profileRoute.Use(JWTMiddleware) // Apply JWT middleware here
 	profileRoute.HandleFunc("", h.setupProfileHandler).Methods("POST")
+
+	// REMOVE THI LATER
+	// Apply JWTMiddleware to the /setUpProfile route
+	dummyKafkaRoute := router.PathPrefix("/dummy").Subrouter()
+	dummyKafkaRoute.Use(JWTMiddleware) // Apply JWT middleware here
+	dummyKafkaRoute.HandleFunc("", h.dummyHandler).Methods("POST")
 
 	// Route for liking a user profile
 	likeRoute := router.PathPrefix("/like/{user_id}").Subrouter()
@@ -78,6 +89,55 @@ func (h *Handler) RegisterRoutes(router *mux.Router) {
 	matchRoute := router.PathPrefix("/matches/{user_id}").Subrouter()
 	matchRoute.Use(JWTMiddleware) // Apply JWT middleware here
 	matchRoute.HandleFunc("", h.getMatches).Methods("GET")
+
+	// Route to fetch user and profile by ID
+	userProfileRoute := router.PathPrefix("/user/{user_id}").Subrouter()
+	userProfileRoute.Use(JWTMiddleware)
+	userProfileRoute.HandleFunc("", h.fetchUserProfileByID).Methods("GET")
+
+	//get next user
+	nextProfileRoute := router.PathPrefix("/profile/next").Subrouter()
+	nextProfileRoute.Use(JWTMiddleware)
+	nextProfileRoute.HandleFunc("", h.getNextUserToShow).Methods("GET")
+
+	//get all notifications TODO MODIFY TO ONLY SHOW OWN NOTIFICATIONS
+	notificationRoute := router.PathPrefix("/notifications/all").Subrouter()
+	notificationRoute.Use(JWTMiddleware)
+	notificationRoute.HandleFunc("", h.getAllNotifications).Methods("GET")
+
+}
+
+func (h *Handler) dummyHandler(w http.ResponseWriter, r *http.Request) {
+
+	// Call dummy producer
+	kafka.ProduceDummyEvent()
+
+	// Prepare the response
+	response := map[string]string{"message": "Dummy event produced successfully"}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+	}
+
+}
+
+// fetchAllUsers handles the request to fetch all users
+func (h *Handler) fetchAllUsers(w http.ResponseWriter, r *http.Request) {
+
+	// Query for all users
+	var users []model.User
+	if err := model.DB.Find(&users).Error; err != nil {
+		http.Error(w, "Failed to retrieve users", http.StatusInternalServerError)
+		return
+	}
+
+	// Prepare the response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(users); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+	}
 }
 
 // showHomePage handles the request for the home page
@@ -178,6 +238,16 @@ func (h *Handler) setupProfileHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	lat, lon, err := GetCurrentLocation()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get current location: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	profile.Location = model.Location{
+		Latitude:  lat,
+		Longitude: lon,
+	}
 
 	profile.UserID = user.ID
 
@@ -189,6 +259,63 @@ func (h *Handler) setupProfileHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(profile)
+}
+
+func (h *Handler) setUpFilter(w http.ResponseWriter, r *http.Request) {
+	user, ok := context.Get(r, "user").(model.User)
+	if !ok {
+		http.Error(w, "User not found in context", http.StatusUnauthorized)
+		return
+	}
+
+	var filter model.Filter
+
+	// Decode the request body into the Filter struct
+	if err := json.NewDecoder(r.Body).Decode(&filter); err != nil {
+		http.Error(w, "Invalid request payload", http.StatusBadRequest)
+		return
+	}
+
+	// Validate filter fields
+	if filter.Gender == "" {
+		http.Error(w, "Gender is required", http.StatusBadRequest)
+		return
+	}
+	if filter.LowerAge < 0 || filter.UpperAge < filter.LowerAge {
+		http.Error(w, "Invalid age range", http.StatusBadRequest)
+		return
+	}
+	if filter.Radius <= 0 {
+		http.Error(w, "Radius must be greater than zero", http.StatusBadRequest)
+		return
+	}
+
+	// Check if a filter already exists for the user
+	var existingFilter model.Filter
+	if err := model.DB.Where("user_id = ?", user.ID).First(&existingFilter).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		http.Error(w, "Failed to check existing filter", http.StatusInternalServerError)
+		return
+	}
+
+	// Update or create the filter
+	filter.UserID = user.ID
+	if existingFilter.ID != 0 {
+		// Update existing filter
+		if err := model.DB.Model(&existingFilter).Updates(filter).Error; err != nil {
+			http.Error(w, "Failed to update filter", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		// Create new filter
+		if err := model.DB.Create(&filter).Error; err != nil {
+			http.Error(w, "Failed to create filter", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Respond with success
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Filter set up successfully"))
 }
 
 // LIKE user
@@ -227,7 +354,7 @@ func (h *Handler) likeUser(w http.ResponseWriter, r *http.Request) {
 	if err := model.DB.Where("liker_id = ? AND likee_id = ?", likeeID, likerID).First(&reverseLike).Error; err == nil {
 		// A match is found
 
-		// A match is found, create a new entry in the Matches table
+		// Create a new entry in the Matches table
 		match := model.Match{
 			User1: uint(likerID),
 			User2: uint(likeeID),
@@ -237,17 +364,60 @@ func (h *Handler) likeUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		message := "You matched with user " + strconv.FormatUint(uint64(likeeID), 10)
+		// Produce a match event to Kafka
+		kafka.ProduceMatchEvent(uint(likerID), uint(likeeID))
+
+		message := "You have a new match."
 		response := map[string]string{"message": message}
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(response)
 	} else {
 		// No match found
-		message := "You received a new like"
+
+		// Produce a like event to Kafka
+		kafka.ProduceLikeEvent(uint(likerID), uint(likeeID))
+
+		message := "You sent a new like."
 		response := map[string]string{"message": message}
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(response)
 	}
+}
+
+// DISLIKE USERS
+func (h *Handler) dislikeUser(w http.ResponseWriter, r *http.Request) {
+	// Extract the user ID to be liked from the URL
+	vars := mux.Vars(r)
+	dislikeeIDStr := vars["user_id"]
+	dislikeeID, err := strconv.ParseUint(dislikeeIDStr, 10, 32)
+	if err != nil {
+		http.Error(w, "Invalid user ID", http.StatusBadRequest)
+		return
+	}
+
+	// Get the current user's ID from the JWT token
+	user, ok := context.Get(r, "user").(model.User)
+	if !ok {
+		http.Error(w, "User not found in context", http.StatusUnauthorized)
+		return
+	}
+	dislikerID := user.ID
+
+	// Create a new entry in the likes table
+	dislike := model.DisLike{
+		DisLikerID: uint(dislikerID),
+		DisLikeeID: uint(dislikeeID),
+	}
+	if err := model.DB.Create(&dislike).Error; err != nil {
+		http.Error(w, "Failed to create dislike", http.StatusInternalServerError)
+		return
+	}
+
+	message := "You sent a new dislike"
+	response := map[string]string{"message": message}
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
+
 }
 
 //fetch all matches
@@ -289,7 +459,134 @@ func (h *Handler) getMatches(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// TODO RETRIEVE PROFILES FOR THE USER TO LIKE
-// USE a queue for this..liked profiles will ve remoed from the queue
-// unliked profile will be moved to the back of the queue
-// also allow for filtering based on age range
+// Get User info based on ID
+func (h *Handler) fetchUserProfileByID(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	userIDStr := vars["user_id"]
+	userID, err := strconv.ParseUint(userIDStr, 10, 32)
+	if err != nil {
+		http.Error(w, "Invalid user ID", http.StatusBadRequest)
+		return
+	}
+
+	// Fetch user info
+	var user model.User
+
+	if err := model.DB.First(&user, userID).Error; err != nil {
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	}
+
+	// Fetch profile info
+	var profile model.Profile
+	if err := model.DB.Where("user_id = ?", userID).First(&profile).Error; err != nil {
+		http.Error(w, "Profile not Found", http.StatusNotFound)
+		return
+	}
+
+	// Prepare the response
+	response := struct {
+		User    model.User    `json:"user"`
+		Profile model.Profile `json:"profile"`
+	}{
+		User:    user,
+		Profile: profile,
+	}
+
+	// Send the response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+	}
+}
+
+var queue []model.User
+var queueMutex sync.Mutex
+
+// loadQueue loads users into the queue who haven't been liked or disliked yet
+func loadQueue(db *gorm.DB, userID uint) {
+	// Fetch filter settings for the current user
+	var filter model.Filter
+	err := db.First(&filter, "user_id = ?", userID).Error
+	if err != nil {
+		fmt.Printf("Error loading filter: %v\n", err)
+		return
+	}
+
+	// Fetch users based on the filter
+	var users []model.User
+	err = db.Table("users").
+		Select("users.*").
+		Where("users.id != ?", userID).
+		Where("users.id NOT IN (SELECT likee_id FROM likes WHERE liker_id = ?)", userID).
+		Where("users.id NOT IN (SELECT dis_likee_id FROM dis_likes WHERE dis_liker_id = ?)", userID).
+		Where("gender = ?", filter.Gender).
+		Where("age BETWEEN ? AND ?", filter.LowerAge, filter.UpperAge).
+		Where("ST_Distance_Sphere(location, (SELECT location FROM users WHERE id = ?)) <= ?", userID, filter.Radius*1000).
+		Find(&users).Error
+	if err != nil {
+		fmt.Printf("Error loading users: %v\n", err)
+		return
+	}
+
+	// Update the global queue
+	queueMutex.Lock()
+	defer queueMutex.Unlock()
+	queue = users
+}
+
+// getNextUserToShow retrieves the next user from the queue and handles the response
+func (h *Handler) getNextUserToShow(w http.ResponseWriter, r *http.Request) {
+	// Get the current user's ID from the request context or query parameters
+	user, ok := context.Get(r, "user").(model.User)
+	if !ok {
+		http.Error(w, "User not found in context", http.StatusUnauthorized)
+		return
+	}
+	userID := user.ID
+
+	queueMutex.Lock()
+	defer queueMutex.Unlock()
+
+	if len(queue) == 0 {
+		// Load more users if the queue is empty
+		loadQueue(model.DB, userID)
+	}
+
+	if len(queue) == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if err := json.NewEncoder(w).Encode(map[string]string{"message": "No users to show"}); err != nil {
+			http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	// Show the next user in the queue
+	userToShow := queue[0]
+	queue = queue[1:]
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(userToShow); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+//get all notifications
+
+func (h *Handler) getAllNotifications(w http.ResponseWriter, r *http.Request) {
+
+	// Fetch all notifications from the database
+	var notifications []model.Notification
+	if err := model.DB.Find(&notifications).Error; err != nil {
+		http.Error(w, "Error retrieving notifications", http.StatusInternalServerError)
+		return
+	}
+
+	// Respond with notifications
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(notifications); err != nil {
+		http.Error(w, "Error encoding notifications", http.StatusInternalServerError)
+	}
+}

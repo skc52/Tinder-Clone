@@ -3,9 +3,13 @@ package main
 import (
 	"log"
 	"myserver/api"
+	"myserver/kafka"
 )
 
 func main() {
+	// Initialize Kafka consumers
+	kafka.InitKafka()
+
 	portStr := "8081"                        // Port number for the server
 	server := api.NewMyServer(":" + portStr) // Create a new server instance with the specified port
 

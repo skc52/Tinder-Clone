@@ -1,5 +1,110 @@
 
+# services:
+#   zookeeper:
+#     restart: always
+#     container_name: kafka-like-zookeeper
+#     image: docker.io/bitnami/zookeeper:3.8
+#     ports:
+#       - "2181:2181"
+#     volumes:
+#       - "zookeeper-volume:/bitnami"
+#     environment:
+#       - ALLOW_ANONYMOUS_LOGIN=yes
+#     networks:
+#       - app-network
+
+#   kafka:
+#     restart: always
+#     container_name: kafka-like
+#     image: docker.io/bitnami/kafka:3.3
+#     ports:
+#       - "9093:9093"
+#     volumes:
+#       - "kafka-volume:/bitnami"
+#     environment:
+#       - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
+#       - KAFKA_CFG_ADVERTISED_LISTENERS=CLIENT://kafka:9092,EXTERNAL://localhost:9093
+#       - KAFKA_CFG_LISTENERS=CLIENT://:9092,EXTERNAL://:9093
+#       - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CLIENT:PLAINTEXT,EXTERNAL:PLAINTEXT
+#       - KAFKA_CFG_INTER_BROKER_LISTENER_NAME=CLIENT
+#     depends_on:
+#       - zookeeper
+#     networks:
+#       - app-network
+
+#   db:
+#     image: postgres:13
+#     container_name: postgres_db
+#     environment:
+#       POSTGRES_USER: yourusername
+#       POSTGRES_PASSWORD: yourpassword
+#       POSTGRES_DB: tinder_clone_db
+#     ports:
+#       - "5432:5432"
+#     volumes:
+#       - db_data:/var/lib/postgresql/data
+#       - ./db/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+#     networks:
+#       - app-network
+
+#   # Uncomment and configure the app service if needed
+#   app:
+#     build: .
+#     depends_on:
+#       - zookeeper
+#       - kafka
+#       - db
+#     networks:
+#       - app-network
+#     ports:
+#       - "8081:8081"
+#     environment:
+#       - KAFKA_BROKER=kafka:9092  # Ensure the app uses the correct Kafka broker address
+
+# volumes:
+#   kafka-volume:
+#   zookeeper-volume:
+#   db_data:
+
+# networks:
+#   app-network:
+#     driver: bridge
+
+
+
 services:
+  zookeeper:
+    restart: always
+    container_name: kafka-like-zookeeper
+    image: docker.io/bitnami/zookeeper:3.8
+    ports:
+      - "2181:2181"
+    volumes:
+      - "zookeeper-volume:/bitnami"
+    environment:
+      - ALLOW_ANONYMOUS_LOGIN=yes
+    networks:
+      - app-network
+
+  kafka:
+    restart: always
+    container_name: kafka-like
+    image: docker.io/bitnami/kafka:3.3
+    ports:
+      - "9093:9093"
+    volumes:
+      - "kafka-volume:/bitnami"
+    environment:
+      - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
+      - KAFKA_CFG_ADVERTISED_LISTENERS=CLIENT://kafka:9092,EXTERNAL://localhost:9093
+      - KAFKA_CFG_LISTENERS=CLIENT://:9092,EXTERNAL://:9093
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CLIENT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      - KAFKA_CFG_INTER_BROKER_LISTENER_NAME=CLIENT
+    depends_on:
+      - zookeeper
+    networks:
+      - app-network
+
   db:
     image: postgres:13
     container_name: postgres_db
@@ -17,15 +122,21 @@ services:
 
   app:
     build: .
-
     depends_on:
+      - zookeeper
+      - kafka
       - db
     networks:
       - app-network
     ports:
       - "8081:8081"
+    # entrypoint: ["/usr/local/bin/wait-for-it.sh", "192.168.0.4:9092", "--", "/usr/local/bin/wait-for-it.sh", "192.168.0.3:5432", "--", "./bin/tinder_clone"]
+    environment:
+      - KAFKA_BROKER=kafka:9092  # Ensure the app uses the correct Kafka broker address
 
 volumes:
+  kafka-volume:
+  zookeeper-volume:
   db_data:
 
 networks:
